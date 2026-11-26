@@ -1,0 +1,78 @@
+name: build-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  ipa:
+    name: Build unsigned iOS IPA
+    runs-on: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          swift --version
+          python3 --version
+
+      - name: Generate AppIcon
+        run: |
+          python3 -m venv "$RUNNER_TEMP/icon-venv"
+          "$RUNNER_TEMP/icon-venv/bin/pip" install --quiet pillow
+          "$RUNNER_TEMP/icon-venv/bin/python" scripts/generate_icon.py
+          ls -la Toolbox/Assets.xcassets/AppIcon.appiconset/
+
+      - name: Install XcodeGen
+        run: brew install xcodegen || brew upgrade xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Archive iOS (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild archive -project Toolbox.xcodeproj -scheme Toolbox \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Toolbox.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            2>&1 | tee archive-ios.log
+
+      - name: Package IPA
+        run: |
+          set -e
+          APP=$(find "$RUNNER_TEMP/Toolbox.xcarchive/Products/Applications" -maxdepth 1 -name "*.app" | head -1)
+          echo "App: $APP"
+          test -n "$APP"
+          ls -la "$APP"
+          plutil -p "$APP/Info.plist"
+          mkdir -p ipa/Payload
+          cp -R "$APP" ipa/Payload/
+          cd ipa
+          zip -qry ../Toolbox.ipa Payload
+          cd ..
+          ls -lh Toolbox.ipa
+          unzip -l Toolbox.ipa | head -30
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Toolbox-ipa
+          path: Toolbox.ipa
+          if-no-files-found: error
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-build-logs
+          path: "*.log"
+          if-no-files-found: ignore
